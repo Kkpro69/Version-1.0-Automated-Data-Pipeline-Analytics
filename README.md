@@ -27,7 +27,7 @@ Alur kerja data pada sistem ini dirancang dengan prinsip pemisahan tugas (*separ
 *(Tambahkan gambar dengan format: `![Deskripsi Gambar](link_gambar)` di sini)*
 
 1. **Antarmuka Bot (Data Entry):** <img width="396" height="173" alt="Screen Shot 2026-11-11 at 15 20 11" src="https://github.com/user-attachments/assets/03b31865-5066-4ba0-b5c1-322192b8a82c" />
-2. **Visualisasi In-App (Matplotlib):** [Tautkan screenshot diagram batang dari Telegram di sini]
+2. **Visualisasi In-App (Matplotlib):** <img width="1189" height="1273" alt="photo_6307699691327525974_y" src="https://github.com/user-attachments/assets/cb2bacb4-c500-414d-bda0-e08c9d46d660" />
 3. **Skema Database (Google Sheets):** <img width="791" height="305" alt="Screen Shot 2026-11-11 at 16 51 01" src="https://github.com/user-attachments/assets/7e8e3334-1064-451e-ac6e-b4d9c62e5be3" />
 
 ## 🚀 Roadmap Pengembangan (Fase Selanjutnya)
