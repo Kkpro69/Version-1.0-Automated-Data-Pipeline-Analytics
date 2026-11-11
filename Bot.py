@@ -5,6 +5,12 @@ import time
 from collections import defaultdict
 from datetime import datetime
 import pytz
+from io import BytesIO
+
+import matplotlib
+matplotlib.use('Agg')  # backend tanpa GUI, wajib di server
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 import gspread
 from requests.exceptions import ConnectionError as RequestsConnectionError
@@ -20,7 +26,6 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-
 # ==============================
 # KONFIGURASI
 # ==============================
@@ -31,13 +36,13 @@ CREDENTIALS_FILE = 'credentials.json'
 
 # Pilihan data (mudah diubah sesuai kebutuhan)
 CATEGORY_OPTIONS = {
-    'Expense': ['Food_Beverage', 'Transportation', 'Utilities','Entertainment','Investment','Personal_Care','Maintenance_Repair','Social_Donation'],
+    'Expense': ['Food_Beverage', 'Transportation', 'Utilities','Entertainment','Investment','Personal_Care','Maintenance_Repair','Social_Donation','Other_Expense'],
     'Income': ['Active_Income', 'Passive_Income','Other_Income'],
 }
 SUB_CATEGORY_OPTIONS = {
     'Food_Beverage': ['Dine_In', 'Take_Away','Coffee_Snacks','Delivery', 'Groceries'],
     'Transportation': ['Fuel','Parking','Service', 'Public_Transport'],
-    'Utilities': ['Internet'],
+    'Utilities': ['Internet','Membeli Barang'],
     'Entertainment': ['Game','Date','Liburan'],
     'Investment': ['RDPU','Trading'],
     'Personal_Care': ['Skincare_Cosmetics','Toiletries','Grooming','Medical_Health'],
@@ -46,6 +51,7 @@ SUB_CATEGORY_OPTIONS = {
     'Active_Income': ['Salary', 'Freelance', 'Bonus'],
     'Passive_Income': ['Investment_Yield', 'Bank_Interest', 'CashBack'],
     'Other_Income': ['Gift', 'Refund'],
+    'Other_Expense': ['Other'],
 }
 WALLET_OPTIONS = ['Cash','E-Wallet']
 NEEDS_WANTS_OPTIONS = ['Needs', 'Wants', 'N/A']
@@ -58,7 +64,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
 
 # ==============================
 # KONEKSI GOOGLE SHEETS
@@ -94,15 +99,33 @@ def retry_on_connection_error(func, retries: int = 3):
 
 
 # ==============================
-# HELPER
+# HELPER KEYBOARD & LOAD
 # ==============================
-def build_keyboard(options: list[str], prefix: str) -> InlineKeyboardMarkup:
-    """Membuat InlineKeyboardMarkup dari daftar opsi, dengan callback_data berprefiks."""
-    buttons = [
+AMOUNT_PROMPT = 'Ketik nominal (angka saja):'
+
+
+def nav_buttons(show_back: bool) -> list[InlineKeyboardButton]:
+    """Tombol navigasi: Kembali (opsional) dan Batal."""
+    buttons = []
+    if show_back:
+        buttons.append(InlineKeyboardButton('⬅️ Kembali', callback_data='back'))
+    buttons.append(InlineKeyboardButton('❌ Batal', callback_data='cancel'))
+    return buttons
+
+
+def build_keyboard(options: list[str], prefix: str, show_back: bool = True) -> InlineKeyboardMarkup:
+    """Membuat InlineKeyboardMarkup dari daftar opsi, ditambah baris navigasi."""
+    rows = [
         [InlineKeyboardButton(opt.replace('_', ' '), callback_data=f'{prefix}:{opt}')]
         for opt in options
     ]
-    return InlineKeyboardMarkup(buttons)
+    rows.append(nav_buttons(show_back))
+    return InlineKeyboardMarkup(rows)
+
+
+def nav_only_keyboard(show_back: bool = True) -> InlineKeyboardMarkup:
+    """Keyboard yang hanya berisi tombol navigasi (dipakai di step input teks)."""
+    return InlineKeyboardMarkup([nav_buttons(show_back)])
 
 
 def load_to_sheet(data_list: list[str]) -> None:
@@ -124,15 +147,15 @@ def load_to_sheet(data_list: list[str]) -> None:
 # HANDLER PERCAKAPAN /tambah
 # ==============================
 async def tambah_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Entry point: /tambah. Menampilkan pilihan Type."""
+    """Entry point: /tambah. Menampilkan pilihan Type (tanpa tombol Kembali)."""
     context.user_data.clear()
-    keyboard = build_keyboard(['Income', 'Expense'], 'type')
+    keyboard = build_keyboard(['Income', 'Expense'], 'type', show_back=False)
     await update.message.reply_text('Pilih tipe transaksi:', reply_markup=keyboard)
     return TYPE
 
 
 async def select_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """State TYPE: menyimpan pilihan Type lalu menampilkan Category."""
+    """State TYPE: menyimpan Type lalu menampilkan Category."""
     query = update.callback_query
     await query.answer()
     selected = query.data.split(':', 1)[1]
@@ -141,6 +164,15 @@ async def select_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     keyboard = build_keyboard(CATEGORY_OPTIONS[selected], 'category')
     await query.edit_message_text(f'Tipe: {selected}\n\nPilih kategori:', reply_markup=keyboard)
     return CATEGORY
+
+
+async def back_to_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """State CATEGORY: tombol Kembali ke pilihan Type."""
+    query = update.callback_query
+    await query.answer()
+    keyboard = build_keyboard(['Income', 'Expense'], 'type', show_back=False)
+    await query.edit_message_text('Pilih tipe transaksi:', reply_markup=keyboard)
+    return TYPE
 
 
 async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -155,6 +187,16 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return SUB_CATEGORY
 
 
+async def back_to_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """State SUB_CATEGORY: tombol Kembali ke pilihan Category sesuai Type."""
+    query = update.callback_query
+    await query.answer()
+    tipe = context.user_data['type']
+    keyboard = build_keyboard(CATEGORY_OPTIONS[tipe], 'category')
+    await query.edit_message_text(f'Tipe: {tipe}\n\nPilih kategori:', reply_markup=keyboard)
+    return CATEGORY
+
+
 async def select_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """State SUB_CATEGORY: menyimpan Sub-Kategori lalu meminta nominal."""
     query = update.callback_query
@@ -162,7 +204,10 @@ async def select_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE
     selected = query.data.split(':', 1)[1]
     context.user_data['sub_category'] = selected
 
-    await query.edit_message_text(f'Sub-kategori: {selected}\n\nKetik nominal (angka saja):')
+    await query.edit_message_text(
+        f'Sub-kategori: {selected}\n\n{AMOUNT_PROMPT}',
+        reply_markup=nav_only_keyboard(),
+    )
     return AMOUNT
 
 
@@ -170,13 +215,26 @@ async def input_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     """State AMOUNT: validasi angka lalu menampilkan pilihan Wallet."""
     text = update.message.text.strip().replace('.', '').replace(',', '')
     if not text.isdigit():
-        await update.message.reply_text('❌ Nominal harus berupa angka. Silakan ketik ulang:')
+        await update.message.reply_text(
+            '❌ Nominal harus berupa angka. Silakan ketik ulang:',
+            reply_markup=nav_only_keyboard(),
+        )
         return AMOUNT
 
     context.user_data['amount'] = int(text)
     keyboard = build_keyboard(WALLET_OPTIONS, 'wallet')
     await update.message.reply_text('Pilih dompet:', reply_markup=keyboard)
     return WALLET
+
+
+async def back_to_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """State AMOUNT: tombol Kembali ke pilihan Sub-Kategori."""
+    query = update.callback_query
+    await query.answer()
+    category = context.user_data['category']
+    keyboard = build_keyboard(SUB_CATEGORY_OPTIONS[category], 'subcat')
+    await query.edit_message_text(f'Kategori: {category}\n\nPilih sub-kategori:', reply_markup=keyboard)
+    return SUB_CATEGORY
 
 
 async def select_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -186,8 +244,19 @@ async def select_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     selected = query.data.split(':', 1)[1]
     context.user_data['wallet'] = selected
 
-    await query.edit_message_text(f'Dompet: {selected}\n\nKetik catatan singkat (ketik - jika kosong):')
+    await query.edit_message_text(
+        f'Dompet: {selected}\n\nKetik catatan singkat (ketik - jika kosong):',
+        reply_markup=nav_only_keyboard(),
+    )
     return NOTES
+
+
+async def back_to_amount_from_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """State WALLET: tombol Kembali ke input nominal."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(AMOUNT_PROMPT, reply_markup=nav_only_keyboard())
+    return AMOUNT
 
 
 async def input_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -200,6 +269,26 @@ async def input_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return NEEDS_WANTS
 
 
+async def back_to_amount_from_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """State NOTES: tombol Kembali ke input nominal."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(AMOUNT_PROMPT, reply_markup=nav_only_keyboard())
+    return AMOUNT
+
+
+async def back_to_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """State NEEDS_WANTS: tombol Kembali ke input catatan."""
+    query = update.callback_query
+    await query.answer()
+    wallet = context.user_data['wallet']
+    await query.edit_message_text(
+        f'Dompet: {wallet}\n\nKetik catatan singkat (ketik - jika kosong):',
+        reply_markup=nav_only_keyboard(),
+    )
+    return NOTES
+
+
 async def select_needs_wants(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """State NEEDS_WANTS: menyimpan pilihan terakhir, lalu ETL dan load ke Google Sheets."""
     query = update.callback_query
@@ -207,8 +296,8 @@ async def select_needs_wants(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data['needs_wants'] = query.data.split(':', 1)[1]
 
     try:
-        # Transform: susun data_list sesuai urutan kolom
-        now = datetime.now()
+        # Transform: waktu diambil sesuai zona waktu Asia/Jakarta (WIB)
+        now = datetime.now(pytz.timezone('Asia/Jakarta'))
         data_list = [
             now.strftime('%d/%m/%Y'),                  # Date
             now.strftime('%H:%M:%S'),                  # Time
@@ -242,10 +331,19 @@ async def select_needs_wants(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Membatalkan percakapan kapan saja dengan /batal."""
+async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Tombol ❌ Batal ditekan: hentikan pencatatan."""
+    query = update.callback_query
+    await query.answer()
     context.user_data.clear()
-    await update.message.reply_text('Input dibatalkan. Ketik /tambah untuk memulai lagi.')
+    await query.edit_message_text('Pencatatan dibatalkan.')
+    return ConversationHandler.END
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Perintah /batal: hentikan pencatatan kapan saja."""
+    context.user_data.clear()
+    await update.message.reply_text('Pencatatan dibatalkan.')
     return ConversationHandler.END
 
 
@@ -298,7 +396,7 @@ def build_month_keyboard() -> InlineKeyboardMarkup:
 
 def build_year_keyboard() -> InlineKeyboardMarkup:
     """Membuat tombol tahun: tahun lalu, tahun ini, tahun depan."""
-    tahun_ini = datetime.now().year
+    tahun_ini = datetime.now(pytz.timezone('Asia/Jakarta')).year
     years = [tahun_ini - 1, tahun_ini, tahun_ini + 1]
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(str(y), callback_data=f'ly:{y}') for y in years]]
@@ -399,7 +497,11 @@ async def select_year(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             report = f'Belum ada transaksi pada bulan {BULAN_PENUH[month - 1]}-{year}.'
             await query.edit_message_text(report)
         else:
-            await query.edit_message_text(report, parse_mode='HTML')
+            await query.edit_message_text(
+            report,
+            parse_mode='HTML',
+            reply_markup=build_chart_keyboard(month, year),
+            )
 
     except CONNECTION_ERRORS as e:
         logger.error('Koneksi ke Google Sheets gagal saat laporan: %s', e)
@@ -432,6 +534,143 @@ async def fallback_text_laporan(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text('Silakan pilih menggunakan tombol di atas, atau ketik /batal.')
     return None
 
+# ==============================
+# DIAGRAM LAPORAN (Detail Expense & Income)
+# ==============================
+EXPENSE_COLORS = ['#E07A5F', '#F2A65A', '#D95D39', '#C44536', '#F4A259', '#E9724C']
+INCOME_COLORS = ['#3D9970', '#2E86AB', '#52B788', '#40916C', '#2A9D8F', '#5FA8D3']
+
+
+def build_chart_keyboard(month: int, year: int) -> InlineKeyboardMarkup:
+    """Dua tombol sejajar: Detail Expense dan Detail Income. Bulan & tahun dibawa di callback_data."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('📉 Detail Expense', callback_data=f'chart_expense:{year}:{month:02d}'),
+            InlineKeyboardButton('📈 Detail Income', callback_data=f'chart_income:{year}:{month:02d}'),
+        ]
+    ])
+
+
+def get_breakdown(month: int, year: int, tipe: str) -> list[tuple[str, float]]:
+    """Menjumlahkan Amount per 'Category - Sub_Category' untuk Type tertentu pada bulan & tahun tertentu.
+    Hasil diurutkan dari terkecil ke terbesar agar bar terbesar tampil paling atas."""
+    records = retry_on_connection_error(lambda: worksheet.get_all_records())
+
+    totals = defaultdict(float)
+    for row in records:
+        date_obj = parse_date(row.get('Date', ''))
+        if not date_obj or date_obj.month != month or date_obj.year != year:
+            continue
+        if str(row.get('Type', '')).strip() != tipe:
+            continue
+
+        category = str(row.get('Category', '')).strip() or 'Lainnya'
+        sub_category = str(row.get('Sub_Category', '')).strip() or '-'
+        label = f'{category} - {sub_category}'
+        totals[label] += to_number(row.get('Amount', 0))
+
+    return sorted(totals.items(), key=lambda x: x[1])
+
+
+def render_breakdown_chart(data: list[tuple[str, float]], title: str, color_palette: list[str]) -> BytesIO:
+    """Membuat horizontal bar chart dan mengembalikannya sebagai PNG di dalam BytesIO (RAM)."""
+    labels = [label.replace('_', ' ') for label, _ in data]
+    values = [total for _, total in data]
+    colors = [color_palette[i % len(color_palette)] for i in range(len(data))]
+    max_value = max(values) if values else 0
+
+    # Tinggi figure mengikuti jumlah batang agar tidak berdesakan di layar HP
+    fig, ax = plt.subplots(figsize=(8, max(4, 0.6 * len(data) + 2)))
+
+    bars = ax.barh(labels, values, color=colors, height=0.6)
+
+    # Label nilai di ujung setiap batang
+    for bar, value in zip(bars, values):
+        ax.text(
+            bar.get_width() + max_value * 0.01,
+            bar.get_y() + bar.get_height() / 2,
+            f'Rp {value:,.0f}',
+            va='center',
+            fontsize=9,
+        )
+
+    # Ruang ekstra di kanan agar label nilai tidak terpotong
+    ax.set_xlim(0, max_value * 1.30 if max_value else 1)
+    ax.set_title(title, fontsize=13, fontweight='bold', pad=12)
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
+    ax.tick_params(axis='y', labelsize=9)
+    ax.spines[['top', 'right']].set_visible(False)
+    ax.grid(axis='x', linestyle='--', alpha=0.4)
+    ax.set_axisbelow(True)
+
+    # Margin kiri otomatis menyesuaikan panjang label 'Category - Sub_Category'
+    plt.tight_layout()
+
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    plt.close(fig)  # bebaskan memori matplotlib
+    buf.seek(0)
+    buf.name = 'breakdown_chart.png'
+    return buf
+
+
+async def _send_breakdown(update: Update, context: ContextTypes.DEFAULT_TYPE, tipe: str) -> None:
+    """Logika bersama untuk tombol Detail Expense dan Detail Income."""
+    query = update.callback_query
+
+    try:
+        _, year_str, month_str = query.data.split(':')
+        year, month = int(year_str), int(month_str)
+    except ValueError:
+        await query.answer('Data tombol tidak valid.', show_alert=True)
+        return
+
+    try:
+        data = get_breakdown(month, year, tipe)
+    except CONNECTION_ERRORS as e:
+        logger.error('Koneksi ke Google Sheets gagal saat membuat diagram: %s', e)
+        await query.answer('Koneksi ke Google Sheets terputus. Coba lagi.', show_alert=True)
+        return
+    except gspread.exceptions.APIError as e:
+        logger.error('APIError saat membuat diagram: %s', e)
+        await query.answer('Gagal mengambil data dari Google Sheets.', show_alert=True)
+        return
+    except Exception as e:
+        logger.exception('Error tak terduga saat mengambil data diagram: %s', e)
+        await query.answer('Terjadi kesalahan saat mengambil data.', show_alert=True)
+        return
+
+    # Data kosong: tampilkan popup, tanpa mengirim gambar
+    if not data:
+        await query.answer(
+            f'Tidak ada transaksi {tipe} pada bulan ini.',
+            show_alert=True,
+        )
+        return
+
+    await query.answer('Membuat diagram...')
+
+    try:
+        bulan = BULAN_PENUH[month - 1]
+        title = f'Detail {tipe} {bulan} {year}'
+        palette = EXPENSE_COLORS if tipe == 'Expense' else INCOME_COLORS
+
+        chart_buf = render_breakdown_chart(data, title, palette)
+        await query.message.reply_photo(photo=chart_buf, caption=title)
+
+    except Exception as e:
+        logger.exception('Error tak terduga saat render diagram: %s', e)
+        await query.message.reply_text('❌ Terjadi kesalahan saat membuat diagram.')
+
+
+async def chart_expense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback tombol '📉 Detail Expense'."""
+    await _send_breakdown(update, context, 'Expense')
+
+
+async def chart_income_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback tombol '📈 Detail Income'."""
+    await _send_breakdown(update, context, 'Income')
 
 # ==============================
 # MAIN
@@ -447,13 +686,40 @@ def main() -> None:
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('tambah', tambah_start)],
         states={
-            TYPE: [CallbackQueryHandler(select_type, pattern=r'^type:')],
-            CATEGORY: [CallbackQueryHandler(select_category, pattern=r'^category:')],
-            SUB_CATEGORY: [CallbackQueryHandler(select_sub_category, pattern=r'^subcat:')],
-            AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_amount)],
-            WALLET: [CallbackQueryHandler(select_wallet, pattern=r'^wallet:')],
-            NOTES: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_notes)],
-            NEEDS_WANTS: [CallbackQueryHandler(select_needs_wants, pattern=r'^needs:')],
+            TYPE: [
+                CallbackQueryHandler(select_type, pattern=r'^type:'),
+                CallbackQueryHandler(cancel_callback, pattern=r'^cancel$'),
+            ],
+            CATEGORY: [
+                CallbackQueryHandler(select_category, pattern=r'^category:'),
+                CallbackQueryHandler(back_to_type, pattern=r'^back$'),
+                CallbackQueryHandler(cancel_callback, pattern=r'^cancel$'),
+            ],
+            SUB_CATEGORY: [
+                CallbackQueryHandler(select_sub_category, pattern=r'^subcat:'),
+                CallbackQueryHandler(back_to_category, pattern=r'^back$'),
+                CallbackQueryHandler(cancel_callback, pattern=r'^cancel$'),
+            ],
+            AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, input_amount),
+                CallbackQueryHandler(back_to_sub_category, pattern=r'^back$'),
+                CallbackQueryHandler(cancel_callback, pattern=r'^cancel$'),
+            ],
+            WALLET: [
+                CallbackQueryHandler(select_wallet, pattern=r'^wallet:'),
+                CallbackQueryHandler(back_to_amount_from_wallet, pattern=r'^back$'),
+                CallbackQueryHandler(cancel_callback, pattern=r'^cancel$'),
+            ],
+            NOTES: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, input_notes),
+                CallbackQueryHandler(back_to_amount_from_notes, pattern=r'^back$'),
+                CallbackQueryHandler(cancel_callback, pattern=r'^cancel$'),
+            ],
+            NEEDS_WANTS: [
+                CallbackQueryHandler(select_needs_wants, pattern=r'^needs:'),
+                CallbackQueryHandler(back_to_notes, pattern=r'^back$'),
+                CallbackQueryHandler(cancel_callback, pattern=r'^cancel$'),
+            ],
         },
         fallbacks=[
             CommandHandler('batal', cancel),
@@ -476,6 +742,8 @@ def main() -> None:
 
     application.add_handler(conv_handler)
     application.add_handler(laporan_conv)
+    application.add_handler(CallbackQueryHandler(chart_expense_callback, pattern=r'^chart_expense:'))
+    application.add_handler(CallbackQueryHandler(chart_income_callback, pattern=r'^chart_income:'))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
